@@ -135,6 +135,10 @@ def render_overview():
         st.metric("Active Ads", stats["active_ads"])
     with col3:
         st.metric("Potential Winners (30+ days)", stats["winners_count"])
+        if stats["winners_count"] > 0:
+            if st.button("View Winners"):
+                st.session_state.nav_to_winners = True
+                st.rerun()
     with col4:
         st.metric("Competitors Tracked", len(stats["by_competitor"]))
 
@@ -218,7 +222,7 @@ def render_ads_table():
 
     # Display table with custom styling
     def highlight_winners(row):
-        if row["days_running"] >= 30:
+        if row["Days Running"] >= 30:
             return ["background-color: #d4edda"] * len(row)
         return [""] * len(row)
 
@@ -226,6 +230,9 @@ def render_ads_table():
         "competitor", "ad_text_preview", "started_running_on",
         "days_running", "media_type", "has_low_impressions"
     ]].copy()
+
+    # Fill NaN values to avoid errors
+    display_df["days_running"] = display_df["days_running"].fillna(0)
 
     display_df.columns = [
         "Competitor", "Ad Text", "Start Date",
@@ -252,10 +259,13 @@ def render_ads_table():
         selected_ad = st.selectbox(
             "Select an ad to view details",
             options=ad_options,
+            index=0,
+            key="ad_selector",
             format_func=lambda x: f"{x} - {filtered_df[filtered_df['ad_id'] == x]['competitor'].values[0]}"
         )
 
         if selected_ad:
+            st.markdown("---")
             render_ad_detail(selected_ad, filtered_df)
 
 
@@ -387,13 +397,17 @@ def render_winners():
     st.divider()
     st.subheader("Winner Detail View")
 
+    ad_ids = winners_df["ad_id"].tolist()
     selected_winner = st.selectbox(
         "Select a winner to view details",
-        options=winners_df["ad_id"].tolist(),
-        format_func=lambda x: f"{winners_df[winners_df['ad_id'] == x]['competitor'].values[0]} - {winners_df[winners_df['ad_id'] == x]['days_running'].values[0]} days - {x}"
+        options=ad_ids,
+        index=0,
+        key="winner_selector",
+        format_func=lambda x: f"{winners_df[winners_df['ad_id'] == x]['competitor'].values[0]} - {int(winners_df[winners_df['ad_id'] == x]['days_running'].values[0])} days - {x}"
     )
 
     if selected_winner:
+        st.markdown("---")
         render_ad_detail(selected_winner, winners_df)
 
 
@@ -401,11 +415,19 @@ def main():
     """Main dashboard entry point."""
     st.title("Competitor Ad Tracker")
 
+    # Check for navigation from button click
+    if st.session_state.get("nav_to_winners"):
+        st.session_state.nav_to_winners = False
+        default_page = 2  # Winners tab index
+    else:
+        default_page = 0
+
     # Sidebar navigation
     st.sidebar.title("Navigation")
     page = st.sidebar.radio(
         "Go to",
-        ["Overview", "All Ads", "Winners (30+ days)"]
+        ["Overview", "All Ads", "Winners (30+ days)"],
+        index=default_page
     )
 
     # Refresh button
