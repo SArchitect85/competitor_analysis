@@ -29,6 +29,12 @@ class Ad(Base):
     days_running = Column(Integer, default=0)
     media_downloaded = Column(Boolean, default=False)
     local_media_path = Column(Text)
+
+    # Winner detection fields
+    winner_score = Column(Integer, default=0)  # 0-100 score
+    scaling_cluster_id = Column(String(100), index=True)  # Groups similar ads together
+    snapshot_count = Column(Integer, default=1)  # Number of times seen in snapshots
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

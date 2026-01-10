@@ -68,6 +68,9 @@ def load_ads_data():
                 "is_active": ad.is_active,
                 "cta_type": ad.cta_type,
                 "platforms": ", ".join(ad.platforms) if ad.platforms else "",
+                "winner_score": ad.winner_score or 0,
+                "scaling_cluster_id": ad.scaling_cluster_id,
+                "snapshot_count": ad.snapshot_count or 1,
             })
         return pd.DataFrame(data), competitors
     finally:
@@ -107,15 +110,23 @@ def load_stats():
 
         media_stats = {mt or "Unknown": count for mt, count in media_types}
 
-        # Winners (30+ days)
-        winners_count = db.query(Ad).filter(Ad.days_running >= 30).count()
+        # Winners by score (>= 50)
+        winners_count = db.query(Ad).filter(Ad.winner_score >= 50).count()
+        top_performers = db.query(Ad).filter(Ad.winner_score >= 75).count()
+
+        # Scaling clusters count
+        clusters_count = db.query(func.count(func.distinct(Ad.scaling_cluster_id))).filter(
+            Ad.scaling_cluster_id.isnot(None)
+        ).scalar() or 0
 
         return {
             "total_ads": total_ads,
             "active_ads": active_ads,
             "by_competitor": competitor_stats,
             "media_types": media_stats,
-            "winners_count": winners_count
+            "winners_count": winners_count,
+            "top_performers": top_performers,
+            "clusters_count": clusters_count,
         }
     finally:
         db.close()
@@ -127,20 +138,31 @@ def render_overview():
 
     stats = load_stats()
 
-    # Top metrics
+    # Top metrics row 1
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Total Ads", stats["total_ads"])
     with col2:
         st.metric("Active Ads", stats["active_ads"])
     with col3:
-        st.metric("Potential Winners (30+ days)", stats["winners_count"])
+        st.metric("Winners (Score >= 50)", stats["winners_count"])
         if stats["winners_count"] > 0:
             if st.button("View Winners"):
                 st.session_state.nav_to_winners = True
                 st.rerun()
     with col4:
+        st.metric("Top Performers (Score >= 75)", stats["top_performers"])
+
+    # Top metrics row 2
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
         st.metric("Competitors Tracked", len(stats["by_competitor"]))
+    with col2:
+        st.metric("Scaling Clusters", stats["clusters_count"])
+        if stats["clusters_count"] > 0:
+            if st.button("View Clusters"):
+                st.session_state.nav_to_clusters = True
+                st.rerun()
 
     st.divider()
 
@@ -349,8 +371,8 @@ def render_ad_detail(ad_id: str, df: pd.DataFrame):
 
 
 def render_winners():
-    """Render the winners tab - ads running 30+ days."""
-    st.header("Potential Winners (30+ Days)")
+    """Render the winners tab - ads with score >= 50."""
+    st.header("Winners (Score >= 50)")
 
     df, _ = load_ads_data()
 
@@ -358,15 +380,59 @@ def render_winners():
         st.warning("No ads found in database.")
         return
 
-    # Filter for winners only
-    winners_df = df[df["days_running"] >= 30].copy()
-    winners_df = winners_df.sort_values("days_running", ascending=False)
+    # Filter for winners only (score >= 50)
+    winners_df = df[df["winner_score"] >= 50].copy()
+    winners_df = winners_df.sort_values("winner_score", ascending=False)
 
     if winners_df.empty:
-        st.info("No ads have been running for 30+ days yet.")
+        st.info("No ads have achieved winner status yet (score >= 50).")
+        st.markdown("""
+        **Scoring Criteria:**
+        - Days running 30+: +25 pts | 60+: +15 more | 90+: +10 more
+        - Active status: +10 pts
+        - No low impressions: +15 pts (Low impressions: -20 pts)
+        - Video format: +5 pts
+        - Has landing page: +5 pts
+        - Seen in multiple snapshots: +15 pts
+        """)
         return
 
-    st.success(f"Found {len(winners_df)} potential winners!")
+    # Score distribution
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Winners", len(winners_df))
+    with col2:
+        avg_score = int(winners_df["winner_score"].mean())
+        st.metric("Average Score", avg_score)
+    with col3:
+        top_score = int(winners_df["winner_score"].max())
+        st.metric("Top Score", top_score)
+
+    st.divider()
+
+    # Score breakdown explanation
+    with st.expander("How Winner Scores Work"):
+        st.markdown("""
+        **Scoring Criteria (0-100 scale):**
+
+        | Signal | Points |
+        |--------|--------|
+        | Days running >= 30 | +25 |
+        | Days running >= 60 | +15 more |
+        | Days running >= 90 | +10 more |
+        | Currently active | +10 |
+        | No low impressions tag | +15 |
+        | Has low impressions tag | -20 |
+        | Video format | +5 |
+        | Has landing page URL | +5 |
+        | Seen in multiple snapshots | +15 |
+
+        **Why these signals matter:**
+        - **Days running**: Ads running 30+ days are likely profitable
+        - **Low impressions**: Meta throttles poor-performing ads
+        - **Video**: Typically higher engagement than images
+        - **Multiple snapshots**: Consistency indicates ongoing success
+        """)
 
     # Summary by competitor
     st.subheader("Winners by Competitor")
@@ -376,21 +442,33 @@ def render_winners():
 
     st.divider()
 
-    # Winners table
-    st.subheader("All Winners")
+    # Winners table with scores
+    st.subheader("All Winners (Sorted by Score)")
 
     display_df = winners_df[[
-        "competitor", "ad_text_preview", "started_running_on",
-        "days_running", "media_type", "landing_page_url"
+        "winner_score", "competitor", "ad_text_preview", "started_running_on",
+        "days_running", "media_type", "has_low_impressions", "is_active"
     ]].copy()
 
     display_df.columns = [
-        "Competitor", "Ad Text", "Start Date",
-        "Days Running", "Media Type", "Landing Page"
+        "Score", "Competitor", "Ad Text", "Start Date",
+        "Days Running", "Media Type", "Low Impressions", "Active"
     ]
 
+    # Color code by score
+    def highlight_score(row):
+        score = row["Score"]
+        if score >= 75:
+            return ["background-color: #28a745; color: white"] + [""] * (len(row) - 1)
+        elif score >= 60:
+            return ["background-color: #5cb85c; color: white"] + [""] * (len(row) - 1)
+        else:
+            return ["background-color: #d4edda"] + [""] * (len(row) - 1)
+
+    styled_df = display_df.style.apply(highlight_score, axis=1)
+
     st.dataframe(
-        display_df,
+        styled_df,
         hide_index=True,
         use_container_width=True,
         height=400
@@ -404,10 +482,152 @@ def render_winners():
     for idx, row in winners_df.iterrows():
         ad_id = row["ad_id"]
         competitor = row["competitor"]
+        score = int(row["winner_score"])
         days = int(row["days_running"])
 
-        with st.expander(f"{competitor} - {days} days - {ad_id}"):
+        # Score badge color
+        if score >= 75:
+            badge = "🟢"
+        elif score >= 60:
+            badge = "🟡"
+        else:
+            badge = "🟠"
+
+        with st.expander(f"{badge} Score {score} | {competitor} | {days} days | {ad_id}"):
             render_ad_detail_from_row(dict(row))
+
+
+def render_scaling_clusters():
+    """Render the scaling clusters view."""
+    st.header("Scaling Clusters")
+    st.caption("Groups of similar ads from the same competitor - indicates testing or scaling behavior")
+
+    df, competitors = load_ads_data()
+
+    if df.empty:
+        st.warning("No ads found in database.")
+        return
+
+    # Filter for ads with cluster IDs
+    clustered_df = df[df["scaling_cluster_id"].notna()].copy()
+
+    if clustered_df.empty:
+        st.info("No scaling clusters detected yet. Run the scoring algorithm to detect clusters.")
+        return
+
+    # Get unique clusters
+    clusters = clustered_df.groupby("scaling_cluster_id").agg({
+        "ad_id": "count",
+        "competitor": "first",
+        "winner_score": "mean",
+        "days_running": "mean",
+        "has_low_impressions": lambda x: x.sum(),
+    }).reset_index()
+
+    clusters.columns = ["Cluster ID", "Ads Count", "Competitor", "Avg Score", "Avg Days", "Low Imp Count"]
+    clusters = clusters.sort_values("Ads Count", ascending=False)
+
+    # Summary metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Clusters", len(clusters))
+    with col2:
+        st.metric("Ads in Clusters", len(clustered_df))
+    with col3:
+        avg_cluster_size = round(len(clustered_df) / len(clusters), 1) if len(clusters) > 0 else 0
+        st.metric("Avg Cluster Size", avg_cluster_size)
+
+    st.divider()
+
+    # Explanation
+    with st.expander("What are Scaling Clusters?"):
+        st.markdown("""
+        **Scaling clusters** are groups of similar ads from the same competitor that indicate:
+
+        1. **A/B Testing**: Multiple ad variants with similar text but different creative elements
+        2. **Scaling**: Same winning creative deployed across multiple ad sets
+        3. **Iteration**: Tweaking copy or creative to optimize performance
+
+        **Detection criteria:**
+        - Same competitor (page_id)
+        - Text similarity > 70% OR same media URL
+
+        **Why it matters:**
+        - Large clusters suggest the competitor found a winning formula
+        - Multiple low-impression ads in a cluster = testing phase
+        - Multiple active, long-running ads = successful scaling
+        """)
+
+    # Clusters by competitor
+    st.subheader("Clusters by Competitor")
+    by_competitor = clusters.groupby("Competitor")["Ads Count"].sum().reset_index()
+    by_competitor = by_competitor.sort_values("Ads Count", ascending=False)
+    st.bar_chart(by_competitor.set_index("Competitor")["Ads Count"])
+
+    st.divider()
+
+    # Cluster table
+    st.subheader("All Clusters")
+
+    display_clusters = clusters.copy()
+    display_clusters["Avg Score"] = display_clusters["Avg Score"].round(0).astype(int)
+    display_clusters["Avg Days"] = display_clusters["Avg Days"].round(0).astype(int)
+
+    st.dataframe(
+        display_clusters,
+        hide_index=True,
+        use_container_width=True,
+        height=300
+    )
+
+    st.divider()
+
+    # Cluster details
+    st.subheader("Cluster Details")
+    st.caption("Click on a cluster to see all ads in it")
+
+    # Show top clusters
+    for _, cluster_row in clusters.head(20).iterrows():
+        cluster_id = cluster_row["Cluster ID"]
+        competitor = cluster_row["Competitor"]
+        ads_count = int(cluster_row["Ads Count"])
+        avg_score = int(cluster_row["Avg Score"])
+
+        cluster_ads = clustered_df[clustered_df["scaling_cluster_id"] == cluster_id]
+
+        with st.expander(f"{competitor} | {ads_count} ads | Avg Score: {avg_score} | {cluster_id}"):
+            # Show cluster stats
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                active_count = cluster_ads["is_active"].sum()
+                st.metric("Active Ads", f"{active_count}/{ads_count}")
+            with col2:
+                low_imp = cluster_ads["has_low_impressions"].sum()
+                st.metric("Low Impressions", low_imp)
+            with col3:
+                max_days = int(cluster_ads["days_running"].max())
+                st.metric("Max Days Running", max_days)
+
+            st.markdown("---")
+
+            # Show ads in cluster
+            for _, ad_row in cluster_ads.iterrows():
+                ad_id = ad_row["ad_id"]
+                score = int(ad_row["winner_score"])
+                days = int(ad_row["days_running"])
+                text_preview = ad_row["ad_text_preview"][:80] + "..." if len(ad_row["ad_text_preview"]) > 80 else ad_row["ad_text_preview"]
+
+                st.markdown(f"**{ad_id}** | Score: {score} | {days} days")
+                st.caption(text_preview)
+
+                # Show media thumbnail if available
+                media_path = ad_row["local_media_path"]
+                if media_path:
+                    thumb_path = Path(media_path) / "thumbnail.jpg"
+                    if thumb_path.exists():
+                        st.image(str(thumb_path), width=200)
+
+                st.markdown("---")
 
 
 def main():
@@ -418,6 +638,9 @@ def main():
     if st.session_state.get("nav_to_winners"):
         st.session_state.nav_to_winners = False
         default_page = 2  # Winners tab index
+    elif st.session_state.get("nav_to_clusters"):
+        st.session_state.nav_to_clusters = False
+        default_page = 3  # Clusters tab index
     else:
         default_page = 0
 
@@ -425,7 +648,7 @@ def main():
     st.sidebar.title("Navigation")
     page = st.sidebar.radio(
         "Go to",
-        ["Overview", "All Ads", "Winners (30+ days)"],
+        ["Overview", "All Ads", "Winners", "Scaling Clusters"],
         index=default_page
     )
 
@@ -434,13 +657,27 @@ def main():
         st.cache_data.clear()
         st.rerun()
 
+    # Re-score button
+    if st.sidebar.button("Re-score All Ads"):
+        with st.spinner("Scoring all ads..."):
+            from src.utils.winner_scoring import score_all_ads
+            db = get_db()
+            try:
+                stats = score_all_ads(db)
+                st.sidebar.success(f"Scored {stats['total_ads']} ads!")
+            finally:
+                db.close()
+        st.rerun()
+
     # Page routing
     if page == "Overview":
         render_overview()
     elif page == "All Ads":
         render_ads_table()
-    elif page == "Winners (30+ days)":
+    elif page == "Winners":
         render_winners()
+    elif page == "Scaling Clusters":
+        render_scaling_clusters()
 
     # Footer
     st.sidebar.divider()
