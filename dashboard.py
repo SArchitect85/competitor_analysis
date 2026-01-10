@@ -256,12 +256,14 @@ def render_ads_table():
 
     ad_options = filtered_df["ad_id"].tolist()
     if ad_options:
+        # Build lookup dict for format function
+        ad_info = {row["ad_id"]: row["competitor"] for _, row in filtered_df.iterrows()}
+
         selected_ad = st.selectbox(
             "Select an ad to view details",
             options=ad_options,
-            index=0,
             key="ad_selector",
-            format_func=lambda x: f"{x} - {filtered_df[filtered_df['ad_id'] == x]['competitor'].values[0]}"
+            format_func=lambda x: f"{x} - {ad_info[x]}"
         )
 
         if selected_ad:
@@ -269,80 +271,81 @@ def render_ads_table():
             render_ad_detail(selected_ad, filtered_df)
 
 
+def render_ad_detail_from_row(ad_row):
+    """Render detailed view for a single ad from a row."""
+    ad_id = ad_row["ad_id"]
+
+    with st.container():
+        col1, col2 = st.columns([1, 1])
+
+        with col1:
+            st.markdown("**Competitor:**")
+            st.write(ad_row["competitor"])
+
+            st.markdown("**Ad ID:**")
+            st.code(str(ad_id), language=None)
+
+            st.markdown("**Start Date:**")
+            st.write(ad_row["started_running_on"] or "Unknown")
+
+            st.markdown("**Days Running:**")
+            days = ad_row["days_running"]
+            if days >= 30:
+                st.success(f"{int(days)} days (Potential Winner!)")
+            else:
+                st.write(f"{int(days)} days")
+
+            st.markdown("**Media Type:**")
+            st.write(ad_row["media_type"])
+
+            st.markdown("**Platforms:**")
+            st.write(ad_row["platforms"] or "Unknown")
+
+            if ad_row["landing_page_url"]:
+                st.markdown("**Landing Page:**")
+                url = ad_row["landing_page_url"]
+                st.markdown(f"[{url[:50]}...]({url})")
+
+            if ad_row["cta_type"]:
+                st.markdown("**CTA:**")
+                st.write(ad_row["cta_type"])
+
+        with col2:
+            st.markdown("**Full Ad Text:**")
+            st.markdown(f"```\n{ad_row['ad_text'] or 'No ad text available'}\n```")
+
+            # Show media
+            st.markdown("**Media:**")
+            media_path = ad_row["local_media_path"]
+
+            if media_path:
+                media_dir = Path(media_path)
+
+                if media_dir.exists():
+                    media_file = media_dir / "media.mp4"
+                    image_file = media_dir / "media.jpg"
+                    thumbnail = media_dir / "thumbnail.jpg"
+
+                    if media_file.exists() and ad_row["media_type"] == "VIDEO":
+                        st.video(str(media_file))
+                    elif image_file.exists():
+                        st.image(str(image_file))
+                    elif thumbnail.exists():
+                        st.image(str(thumbnail))
+                    else:
+                        st.info("Media file not found locally")
+                else:
+                    st.info("Media directory not found")
+            elif ad_row["media_url"]:
+                st.markdown(f"Media URL: {ad_row['media_url'][:80]}...")
+            else:
+                st.info("No media available")
+
+
 def render_ad_detail(ad_id: str, df: pd.DataFrame):
     """Render detailed view for a single ad."""
     ad_row = df[df["ad_id"] == ad_id].iloc[0]
-
-    col1, col2 = st.columns([1, 1])
-
-    with col1:
-        st.markdown("**Competitor:**")
-        st.write(ad_row["competitor"])
-
-        st.markdown("**Ad ID:**")
-        st.code(ad_row["ad_id"])
-
-        st.markdown("**Start Date:**")
-        st.write(ad_row["started_running_on"] or "Unknown")
-
-        st.markdown("**Days Running:**")
-        days = ad_row["days_running"]
-        if days >= 30:
-            st.success(f"{days} days (Potential Winner!)")
-        else:
-            st.write(f"{days} days")
-
-        st.markdown("**Media Type:**")
-        st.write(ad_row["media_type"])
-
-        st.markdown("**Platforms:**")
-        st.write(ad_row["platforms"] or "Unknown")
-
-        if ad_row["landing_page_url"]:
-            st.markdown("**Landing Page:**")
-            st.markdown(f"[{ad_row['landing_page_url'][:50]}...]({ad_row['landing_page_url']})")
-
-        if ad_row["cta_type"]:
-            st.markdown("**CTA:**")
-            st.write(ad_row["cta_type"])
-
-    with col2:
-        st.markdown("**Full Ad Text:**")
-        st.text_area(
-            label="Ad Text",
-            value=ad_row["ad_text"] or "No ad text available",
-            height=200,
-            disabled=True,
-            label_visibility="collapsed"
-        )
-
-        # Show media
-        st.markdown("**Media:**")
-        media_path = ad_row["local_media_path"]
-
-        if media_path:
-            media_dir = Path(media_path)
-
-            # Look for media files
-            if media_dir.exists():
-                media_file = media_dir / "media.mp4"
-                image_file = media_dir / "media.jpg"
-                thumbnail = media_dir / "thumbnail.jpg"
-
-                if media_file.exists() and ad_row["media_type"] == "VIDEO":
-                    st.video(str(media_file))
-                elif image_file.exists():
-                    st.image(str(image_file))
-                elif thumbnail.exists():
-                    st.image(str(thumbnail))
-                else:
-                    st.info("Media file not found locally")
-            else:
-                st.info("Media directory not found")
-        elif ad_row["media_url"]:
-            st.markdown(f"Media URL: {ad_row['media_url'][:80]}...")
-        else:
-            st.info("No media available")
+    render_ad_detail_from_row(ad_row)
 
 
 def render_winners():
@@ -393,22 +396,18 @@ def render_winners():
         height=400
     )
 
-    # Winner detail view
+    # Winner detail view - using expanders for each winner
     st.divider()
-    st.subheader("Winner Detail View")
+    st.subheader("Winner Details")
+    st.caption("Click on any winner below to expand and view details")
 
-    ad_ids = winners_df["ad_id"].tolist()
-    selected_winner = st.selectbox(
-        "Select a winner to view details",
-        options=ad_ids,
-        index=0,
-        key="winner_selector",
-        format_func=lambda x: f"{winners_df[winners_df['ad_id'] == x]['competitor'].values[0]} - {int(winners_df[winners_df['ad_id'] == x]['days_running'].values[0])} days - {x}"
-    )
+    for idx, row in winners_df.iterrows():
+        ad_id = row["ad_id"]
+        competitor = row["competitor"]
+        days = int(row["days_running"])
 
-    if selected_winner:
-        st.markdown("---")
-        render_ad_detail(selected_winner, winners_df)
+        with st.expander(f"{competitor} - {days} days - {ad_id}"):
+            render_ad_detail_from_row(dict(row))
 
 
 def main():
